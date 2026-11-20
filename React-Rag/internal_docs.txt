@@ -1,0 +1,20 @@
+Internal Tech Docs - Acme AI Platform (Confidential)
+
+Architecture overview:
+Our production RAG stack, codename "Nimbus", has three layers: an ingestion layer, a retrieval layer and a generation layer.
+The ingestion layer pulls documents from Confluence, Google Drive and Jira every 6 hours, cleans the HTML and splits it into 500 character chunks with 50 characters of overlap.
+
+Retrieval layer:
+Nimbus uses hybrid retrieval. A FAISS dense index built with the all-MiniLM-L6-v2 embedding model is combined with a BM25 keyword index.
+Scores from both retrievers are merged with Reciprocal Rank Fusion (RRF). The top 20 merged results are then reranked by a cross-encoder (ms-marco-MiniLM-L-6-v2) and the top 5 are passed to the LLM.
+
+Generation layer:
+The generation layer runs an open-weight LLM served through Groq for low latency. Every answer must cite the chunk IDs it used.
+If the retriever confidence score is below 0.35 the system replies "I don't know" instead of guessing, to reduce hallucinations.
+
+Agent orchestration:
+Multi-step questions are handled by a LangGraph ReAct agent. The agent can call the internal retriever, a SQL tool over the analytics warehouse and a Jira search tool.
+The maximum number of agent steps is capped at 8 to control cost.
+
+Caching:
+Embeddings are cached in Redis keyed by the SHA-256 hash of the chunk text, which cut ingestion time by 70 percent.

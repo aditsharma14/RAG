@@ -1,0 +1,17 @@
+Internal Research Notes - Applied ML Team
+
+Experiment 14: Transformer variants for long documents
+We compared a standard Transformer, Longformer and a Mixture-of-Experts (MoE) Transformer on our 8k-token contract summarisation dataset.
+Longformer's sliding-window attention reduced memory use by 45 percent compared to full attention, with only a 1.2 point drop in ROUGE-L.
+The MoE variant (8 experts, top-2 routing) gave the best ROUGE-L score (+2.1 over baseline) but training was unstable without a load-balancing loss.
+Conclusion: use Longformer for cost-sensitive workloads and MoE when quality matters most.
+
+Experiment 15: Agent designs
+We tested three agent designs on 200 multi-hop internal questions:
+1. Single-shot RAG (retrieve once, answer once): 61 percent accuracy.
+2. ReAct agent with a single retriever tool: 74 percent accuracy.
+3. ReAct agent with separate tools per knowledge source (tech docs, research notes, Wikipedia, ArXiv): 82 percent accuracy.
+Giving each knowledge source its own clearly described tool helped the LLM pick the right source and reduced irrelevant context.
+
+Experiment 16: Reflection step
+Adding a self-reflection step, where the agent checks whether its draft answer is supported by the retrieved context, cut hallucinations by 30 percent but increased latency by 1.8 seconds on average.
