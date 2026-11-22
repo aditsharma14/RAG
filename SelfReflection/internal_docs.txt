@@ -1,0 +1,7 @@
+Our production stack uses several transformer variants.
+EfficientFormer is used for on-device vision tasks because of its low latency.
+Reformer handles long-document processing thanks to LSH attention and reversible layers.
+LLaMA2 powers the internal chat assistant and is fine-tuned on support tickets.
+TinyBERT is deployed for intent classification where CPU inference is required.
+DistilBERT was evaluated but replaced by TinyBERT due to memory limits.
+All models are served through a Triton inference server with dynamic batching.
