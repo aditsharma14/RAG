@@ -1,0 +1,62 @@
+Internal Engineering Report: Transformer Variants in Production
+=====================================================================
+
+Overview:
+This document summarizes the transformer-based models currently used or evaluated
+across our production systems, along with deployment architecture, optimizations
+and lessons learned.
+
+Transformer Variants in Production:
+
+1. EfficientFormer:
+   - Deployed for on-device image classification in the mobile app.
+   - Chosen for low latency (under 2 ms on iPhone 12 Neural Engine).
+   - Converted to Core ML and ONNX for cross-platform inference.
+   - Replaced MobileViT after A/B tests showed 18% faster inference.
+
+2. DistilBERT:
+   - Used for semantic search over internal support tickets.
+   - 40% smaller than BERT-base with about 97% of its accuracy on our benchmark.
+   - Served behind a FastAPI microservice with Redis caching.
+   - Being phased out for intent tasks in favour of TinyBERT due to memory limits.
+
+3. Reformer:
+   - Tested for memory efficiency on embedded devices.
+   - LSH attention led to 60% memory reduction.
+   - Integration challenges with standard transformers due to bucket collisions.
+   - Ongoing investigation for training stability and gradient clipping strategies.
+
+4. LLaMA2:
+   - Integrated with proprietary instruction-tuned layer.
+   - Combined with domain-specific knowledge graphs.
+   - Used as base model in chat deployment.
+   - Prompt format adapted with multi-turn chat memory and RAG backend.
+   - Experimented with LLaMAIndex and LangGraph-based orchestration.
+
+5. TinyBERT:
+   - Fine-tuned for classification tasks on internal email triage system.
+   - Integrated into Outlook plugin via TensorFlow Lite.
+
+Deployment Architecture:
+
+- Models are served through NVIDIA Triton Inference Server with dynamic batching.
+- GPU inference runs on AWS EKS node groups with A10G instances.
+- CPU-only models (TinyBERT, DistilBERT) run on autoscaled Fargate tasks.
+- Vector search uses FAISS indexes rebuilt nightly from the document store.
+- Monitoring with Prometheus and Grafana; latency SLO is p95 under 300 ms.
+
+Optimizations:
+
+- Distillation of teacher-student models using response alignment
+- Knowledge injection via adapters
+- Mixed-precision training (AMP) with Nvidia A100s
+- Use of DVC and MLflow for experiment tracking
+- Canary rollout strategy for model updates
+- CI/CD: GitHub Actions → Docker → EKS with Helm charts
+
+Additional Notes:
+
+- Vision transformers (ViT and Swin Transformer) evaluated in manufacturing QC tasks.
+- Speech transformers (Wav2Vec 2.0) benchmarked for voice assistant integrations.
+- Tokenizers: SentencePiece, BPE, and unigram tokenizers compared for multilingual tasks.
+- Significant improvements noted with FlashAttention and Rotary Positional Encoding.
