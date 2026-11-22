@@ -27,3 +27,5 @@ wikipedia
 langgraph
 
 
+arxiv<2.2
+langchain-tavily
