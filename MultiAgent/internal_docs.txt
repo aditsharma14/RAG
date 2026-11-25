@@ -1,0 +1,442 @@
+Internal Engineering Report: Transformer Variants in Production
+=====================================================================
+Company: NovaMind Labs (fictional company, created for RAG learning demos)
+Team: ML Platform & Applied AI
+Report period: Q1 2025 - Q3 2025
+Document owner: ML Platform team
+Classification: Internal / Confidential
+
+
+---------------------------------------------------------------------
+SECTION 1: EXECUTIVE SUMMARY
+---------------------------------------------------------------------
+
+This report summarizes every transformer-based model that is currently running
+in production, in limited rollout, or under evaluation across NovaMind Labs
+products. It covers why each model was chosen, how it is deployed, how it
+performs, what it costs, which incidents it caused, and what we plan to do next.
+
+Key numbers for the reporting period:
+
+- Total transformer models in production: 7
+- Models in limited rollout (canary or beta): 2
+- Models under evaluation: 4
+- Total monthly inference requests: about 80 million (plus 9,000 hours of audio)
+- Total monthly inference cost: about 61,400 USD
+- Overall p95 latency across all online endpoints: 241 ms (SLO is 300 ms)
+- Uptime across all model endpoints: 99.93%
+- Number of Sev-1 incidents: 1, number of Sev-2 incidents: 4
+
+Top three wins of the period:
+
+1. Replacing MobileViT with EfficientFormer cut on-device image classification
+   latency by 18% and reduced app crash reports related to the camera screen by 31%.
+2. Moving the support-chat assistant from LLaMA 2 13B to Mistral 7B with
+   AWQ 4-bit quantization reduced GPU cost for that service by 44%.
+3. Adding a reranker (cross-encoder MiniLM) to the RAG pipeline increased
+   answer accuracy on our internal QA benchmark from 71% to 83%.
+
+Top three risks:
+
+1. LLaMA 2 licensing review is still open for one enterprise customer contract.
+2. The Reformer experiment on embedded devices has unstable training.
+3. GPU capacity in the us-east-1 region is close to its limit during peak hours.
+
+
+---------------------------------------------------------------------
+SECTION 2: TRANSFORMER VARIANTS IN PRODUCTION
+---------------------------------------------------------------------
+
+2.1 EfficientFormer (Vision, on-device)
+---------------------------------------
+
+Use case:
+   - On-device image classification in the NovaMind mobile app
+     (product recognition from the camera screen).
+
+Why it was chosen:
+   - Very low latency: under 2 ms per image on the iPhone 12 Neural Engine.
+   - Small size: EfficientFormer-L1 is about 12 million parameters.
+   - Pure transformer design that still runs well on mobile hardware.
+
+Deployment details:
+   - Converted to Core ML for iOS and to ONNX, then TensorFlow Lite, for Android.
+   - Model file size after FP16 conversion: 24 MB.
+   - Shipped inside the app bundle, updated through app releases every 4 weeks.
+
+Results:
+   - Replaced MobileViT after an A/B test with 200,000 users over 3 weeks.
+   - Inference was 18% faster than MobileViT.
+   - Top-1 accuracy on our product dataset: 91.4% (MobileViT was 90.8%).
+   - Camera-screen crash reports dropped by 31% because of lower memory use.
+
+Known issues:
+   - On older Android devices (less than 3 GB RAM), first-run latency is up to 40 ms
+     because of model warm-up.
+   - Mitigation: model is now preloaded when the app starts.
+
+
+2.2 DistilBERT (NLP, semantic search)
+-------------------------------------
+
+Use case:
+   - Semantic search over internal support tickets and the help-center knowledge base.
+
+Why it was chosen:
+   - 40% smaller than BERT-base while keeping about 97% of its accuracy on our benchmark.
+   - 60% faster inference than BERT-base on CPU.
+
+Deployment details:
+   - Served behind a FastAPI microservice.
+   - Redis cache in front of the service; cache hit rate is about 38%.
+   - Runs on CPU-only AWS Fargate tasks with autoscaling between 4 and 20 tasks.
+   - Embeddings are 768-dimensional and stored in a FAISS IVF index.
+
+Results:
+   - p95 latency: 85 ms.
+   - Monthly requests: about 38 million.
+   - Monthly cost: about 2,900 USD.
+   - Recall@10 on the internal ticket search benchmark: 0.86.
+
+Status and plan:
+   - Being phased out for intent classification tasks in favour of TinyBERT
+     because of memory limits on the edge gateways.
+   - Will stay in use for semantic search until the BGE-small migration (see Section 6).
+
+
+2.3 TinyBERT (NLP, email triage)
+--------------------------------
+
+Use case:
+   - Classification of incoming emails into 14 categories (billing, bug report,
+     feature request, legal, spam, and others) for the internal email triage system.
+
+Deployment details:
+   - Fine-tuned TinyBERT-4L (about 14.5 million parameters).
+   - Integrated into the Outlook plugin through TensorFlow Lite, so it runs on the
+     employee's machine and email text never leaves the device.
+   - A server-side copy also runs on Fargate for the shared support inbox.
+
+Results:
+   - Macro F1 score: 0.89 across the 14 categories.
+   - Average inference time on a laptop CPU: 9 ms.
+   - Saves the support team about 120 hours per month of manual triage.
+
+Known issues:
+   - Accuracy drops to 0.74 F1 on emails that mix English and Hindi.
+   - Planned fix: fine-tune a multilingual model (see Section 6).
+
+
+2.4 LLaMA 2 13B (LLM, internal chat assistant)
+----------------------------------------------
+
+Use case:
+   - Base model for "Nova Assist", the internal employee chat assistant used by
+     engineering, sales and HR.
+
+Deployment details:
+   - LLaMA 2 13B with a proprietary instruction-tuned layer trained using LoRA adapters.
+   - Combined with domain-specific knowledge graphs (product catalog, org chart,
+     internal policies) stored in Neo4j.
+   - Prompt format adapted for multi-turn chat memory with a RAG backend.
+   - Orchestration experiments were done with both LlamaIndex and LangGraph.
+     LangGraph was chosen for production because it gave explicit control over
+     multi-step flows and retries.
+   - Served with vLLM on 2 x A10G GPUs per replica, 3 replicas.
+
+Results:
+   - Average answer latency: 1.9 seconds for the first token, 6.5 seconds for a full answer.
+   - Weekly active users: about 2,300 employees.
+   - Thumbs-up rate on answers: 78%.
+   - Monthly cost: about 14,800 USD.
+
+Status and plan:
+   - Licensing review is still open for one enterprise customer who wants
+     Nova Assist inside their own tenant.
+   - Evaluation of Mistral 7B and LLaMA 3 8B as replacements is in progress.
+
+
+2.5 Mistral 7B Instruct (LLM, customer support chat)
+-----------------------------------------------------
+
+Use case:
+   - Customer-facing support chatbot on the NovaMind website and inside the app.
+
+Why it was chosen:
+   - Similar quality to LLaMA 2 13B on our support benchmark (score 7.6 vs 7.8 out of 10)
+     at about half the size.
+   - Sliding window attention and grouped-query attention give faster inference.
+   - Apache 2.0 license, which made the legal review simple.
+
+Deployment details:
+   - Quantized with AWQ to 4-bit.
+   - Served with vLLM on single A10G GPUs, autoscaling between 2 and 8 replicas.
+   - Uses the shared RAG pipeline described in Section 4.
+
+Results:
+   - GPU cost for the support-chat service went down by 44% after migration.
+   - First-token latency: 0.7 seconds; full answer: 3.1 seconds on average.
+   - Ticket deflection rate (questions solved without a human agent): 46%.
+   - Monthly conversations: about 520,000.
+   - Monthly cost: about 9,600 USD.
+
+
+2.6 Whisper Small (Speech, meeting transcription)
+--------------------------------------------------
+
+Use case:
+   - Transcription of internal meetings and customer calls (with consent).
+
+Deployment details:
+   - Whisper Small (244 million parameters) running with faster-whisper (CTranslate2)
+     on GPU, INT8 precision.
+   - Batch jobs run every 15 minutes on spot GPU instances.
+
+Results:
+   - Word error rate (WER) on English calls: 8.2%.
+   - WER on Indian-English calls: 11.9%.
+   - Processes about 9,000 hours of audio per month.
+   - Monthly cost: about 3,100 USD (spot instances save around 60% versus on-demand).
+
+Notes:
+   - Wav2Vec 2.0 was benchmarked earlier for voice assistant integrations,
+     but Whisper gave better accuracy on noisy audio, so Wav2Vec 2.0 was not adopted.
+
+
+2.7 MiniLM Cross-Encoder (Reranking)
+------------------------------------
+
+Use case:
+   - Reranks the top 20 chunks retrieved from the vector store before they are
+     sent to the LLM in every RAG flow.
+
+Deployment details:
+   - cross-encoder/ms-marco-MiniLM-L-6-v2, served on Triton with dynamic batching.
+   - Runs on CPU; average 22 ms for 20 query-chunk pairs.
+
+Results:
+   - Internal QA benchmark accuracy went from 71% to 83% after adding the reranker.
+   - Hallucination rate (answers that cite content not in the documents) went
+     from 9% to 4%.
+
+
+---------------------------------------------------------------------
+SECTION 3: MODELS IN LIMITED ROLLOUT AND UNDER EVALUATION
+---------------------------------------------------------------------
+
+3.1 Limited rollout
+
+Swin Transformer (Vision, manufacturing quality control):
+   - Running on 2 of our 6 partner factory lines as a canary.
+   - Detects surface defects on metal parts from high-resolution camera images.
+   - Defect recall: 94%, false positive rate: 3.5%.
+   - Compared with ViT-B/16, Swin gave 6% higher recall on small defects because of
+     its hierarchical windows.
+   - Edge deployment on NVIDIA Jetson Orin with TensorRT, 28 ms per image.
+
+LLaMA 3 8B Instruct (LLM, internal beta):
+   - 10% of Nova Assist traffic is routed to LLaMA 3 8B.
+   - Early results: thumbs-up rate 81% (vs 78% for LLaMA 2 13B) and 35% lower cost.
+   - Expected to fully replace LLaMA 2 13B by end of Q4 2025 if licensing is cleared.
+
+3.2 Under evaluation
+
+Reformer:
+   - Tested for memory efficiency on embedded devices for long sensor logs.
+   - LSH (locality-sensitive hashing) attention gave a 60% memory reduction.
+   - Integration challenges with standard transformer tooling because of bucket
+     collisions in LSH attention.
+   - Training is unstable; loss spikes appear after about 30,000 steps.
+   - Ongoing investigation of gradient clipping (max norm 0.5 vs 1.0) and
+     learning-rate warm-up strategies.
+
+ViT (Vision Transformer):
+   - Evaluated for manufacturing QC before Swin was chosen.
+   - Needs large training data; with our 40,000 labelled images it overfit.
+
+Longformer:
+   - Evaluated for summarizing long legal contracts (up to 16,000 tokens).
+   - Good quality, but LLM-based summarization with chunking was simpler to maintain.
+
+Phi-3 Mini:
+   - Evaluated as an on-device LLM for offline help inside the mobile app.
+   - 3.8 billion parameters; runs at about 12 tokens per second on flagship phones.
+   - Battery drain is the main concern; decision expected in Q1 2026.
+
+
+---------------------------------------------------------------------
+SECTION 4: RAG PIPELINE ARCHITECTURE
+---------------------------------------------------------------------
+
+All LLM-based products share one RAG pipeline, codename "Atlas".
+
+Ingestion:
+   - Sources: Confluence, Google Drive, Jira, Zendesk help center, product PDFs.
+   - Documents are pulled every 6 hours.
+   - HTML is cleaned and text is split with a recursive character splitter:
+     chunk size 500 characters, overlap 50 characters.
+   - About 1.8 million chunks are indexed in total.
+
+Embeddings:
+   - Current model: all-MiniLM-L6-v2 (384 dimensions) for general documents.
+   - DistilBERT embeddings are still used for the support-ticket index.
+
+Vector store:
+   - FAISS indexes, rebuilt nightly from the document store.
+   - HNSW index for the general index, IVF index for the ticket index.
+
+Retrieval flow:
+   1. Query rewriting with the LLM (expands abbreviations and product codes).
+   2. Hybrid retrieval: BM25 keyword search + vector search, top 20 results merged.
+   3. Reranking with the MiniLM cross-encoder, top 5 kept.
+   4. Answer generation with citations to the source chunks.
+
+Multi-agent orchestration:
+   - Complex requests in Nova Assist use a LangGraph supervisor with three agents:
+     a research agent (internal search + web search), a math/analytics agent
+     (SQL and calculations), and a writer agent (reports and summaries).
+   - The supervisor routes one task at a time and stops after at most 12 steps.
+   - Average multi-agent request takes 14 seconds and costs about 4 times a normal request.
+
+
+---------------------------------------------------------------------
+SECTION 5: DEPLOYMENT ARCHITECTURE AND INFRASTRUCTURE
+---------------------------------------------------------------------
+
+Serving:
+   - Most models are served through NVIDIA Triton Inference Server with dynamic batching.
+   - LLMs (LLaMA 2, LLaMA 3, Mistral) are served with vLLM for paged attention and
+     continuous batching.
+   - GPU inference runs on AWS EKS node groups with A10G instances (g5.xlarge and g5.2xlarge).
+   - CPU-only models (TinyBERT, DistilBERT, MiniLM reranker) run on autoscaled Fargate tasks.
+
+Regions:
+   - Primary: us-east-1. Secondary: eu-west-1 for European customers (GDPR).
+   - us-east-1 GPU usage reaches 92% during peak hours (14:00-18:00 UTC).
+
+Monitoring:
+   - Prometheus and Grafana for metrics; latency SLO is p95 under 300 ms for
+     non-LLM endpoints and first token under 1.5 seconds for LLM endpoints.
+   - LangSmith for tracing LLM and agent calls.
+   - Data drift checks run weekly with Evidently AI.
+
+CI/CD:
+   - GitHub Actions -> Docker -> EKS with Helm charts.
+   - Every model update goes through a canary rollout: 5% traffic for 24 hours,
+     then 25%, then 100%, with automatic rollback if error rate rises above 1%.
+
+Experiment tracking:
+   - DVC for dataset versioning, MLflow for experiments and the model registry.
+
+
+---------------------------------------------------------------------
+SECTION 6: OPTIMIZATIONS AND TECHNIQUES
+---------------------------------------------------------------------
+
+Training:
+   - Knowledge distillation from teacher to student models using response alignment
+     (used for TinyBERT and DistilBERT fine-tuning).
+   - Knowledge injection through adapters (LoRA rank 16) instead of full fine-tuning.
+   - Mixed-precision training (AMP, BF16) on NVIDIA A100 GPUs.
+
+Inference:
+   - FlashAttention-2 gave a 2.1x speed-up on long prompts (above 4,000 tokens).
+   - Rotary Positional Encoding (RoPE) scaling allowed LLaMA-based models to handle
+     8,000-token contexts.
+   - AWQ 4-bit quantization for Mistral 7B: 3.4x less GPU memory with less than
+     1 point drop on our benchmark.
+   - INT8 quantization with TensorRT for vision models on the edge.
+   - KV-cache reuse for repeated system prompts saves about 18% of GPU time in chat.
+
+Tokenizers:
+   - SentencePiece, BPE and unigram tokenizers were compared for multilingual tasks.
+   - SentencePiece unigram gave the best results on Hindi and Tamil text, with
+     about 22% fewer tokens per sentence than BPE.
+
+Planned work (Q4 2025 - Q1 2026):
+   - Migrate the support-ticket index from DistilBERT to BGE-small embeddings.
+   - Fine-tune multilingual-MiniLM for Hindi-English email triage.
+   - Fully replace LLaMA 2 13B with LLaMA 3 8B.
+   - Add a GPU node group in us-west-2 to reduce peak pressure in us-east-1.
+
+
+---------------------------------------------------------------------
+SECTION 7: COST BREAKDOWN (MONTHLY, USD)
+---------------------------------------------------------------------
+
+   Model / Service                      Monthly requests     Monthly cost (USD)
+   -------------------------------------------------------------------------
+   LLaMA 2 13B (Nova Assist)            6.2 million          14,800
+   Mistral 7B (support chat)            11.5 million          9,600
+   LLaMA 3 8B (beta, 10% traffic)       0.7 million           1,100
+   DistilBERT (semantic search)         38 million            2,900
+   TinyBERT (email triage, server)      4.1 million             600
+   Whisper Small (transcription)        9,000 audio hours     3,100
+   MiniLM reranker                      17 million            1,300
+   Swin Transformer (factory canary)    2.4 million             900
+   Embedding + FAISS indexing jobs      nightly batch         4,200
+   Shared GPU capacity reserve          -                    22,900
+   -------------------------------------------------------------------------
+   Total                                about 80 million     61,400
+
+Notes:
+   - On-device models (EfficientFormer, TinyBERT in Outlook) have no server
+     inference cost.
+   - Moving 100% of Nova Assist traffic to LLaMA 3 8B is expected to save about
+     5,200 USD per month.
+
+
+---------------------------------------------------------------------
+SECTION 8: INCIDENTS AND LESSONS LEARNED
+---------------------------------------------------------------------
+
+Incident 1 (Sev-1, March 2025): Support chatbot gave outdated refund policy
+   - Cause: the FAISS index rebuild failed silently for 3 nights, so the chatbot used
+     an old version of the refund policy document.
+   - Impact: about 1,400 customers received wrong refund information.
+   - Fix: index rebuild jobs now alert on failure, and every answer shows the
+     "last updated" date of its source document.
+   - Lesson: freshness of the knowledge base is as important as model quality.
+
+Incident 2 (Sev-2, April 2025): GPU out-of-memory in Nova Assist
+   - Cause: very long chat histories (over 30 turns) exceeded the KV-cache budget.
+   - Fix: chat memory is now summarized after 10 turns.
+
+Incident 3 (Sev-2, May 2025): Multi-agent loop
+   - Cause: the research agent and writer agent kept handing the task back to each
+     other because neither produced a final answer.
+   - Impact: some requests ran for over 2 minutes and cost 20 times a normal request.
+   - Fix: a hard step limit (recursion limit of 12) and a "FINAL ANSWER" stop marker.
+
+Incident 4 (Sev-2, June 2025): Swin false positives after lighting change
+   - Cause: a factory replaced its lights, which changed image colors.
+   - Fix: added color-jitter augmentation and a weekly drift check on image statistics.
+
+Incident 5 (Sev-2, August 2025): Whisper transcription delays
+   - Cause: spot GPU instances were reclaimed during a regional capacity shortage.
+   - Fix: fallback to on-demand instances when the job queue is older than 1 hour.
+
+General lessons:
+   - Smaller, well-tuned models (Mistral 7B, TinyBERT) often beat larger models on
+     cost per useful answer.
+   - A reranker is one of the cheapest ways to improve RAG answer quality.
+   - Multi-agent systems need step limits, cost tracking and clear stop conditions.
+   - Every model change must go through canary rollout, even "small" ones.
+
+
+---------------------------------------------------------------------
+SECTION 9: GLOSSARY
+---------------------------------------------------------------------
+
+   AWQ           Activation-aware Weight Quantization, a 4-bit quantization method.
+   Canary        Releasing a change to a small share of traffic before everyone.
+   FAISS         Facebook AI Similarity Search, a library for vector search.
+   FlashAttention  A faster, memory-efficient way to compute attention on GPUs.
+   LoRA          Low-Rank Adaptation, a cheap fine-tuning method using small adapters.
+   LSH attention Attention that groups similar tokens with hashing (used in Reformer).
+   p95 latency   95% of requests are faster than this value.
+   RAG           Retrieval-Augmented Generation.
+   Reranker      A model that re-sorts retrieved chunks by relevance to the query.
+   RoPE          Rotary Positional Encoding, a way to encode token positions.
+   vLLM          An open-source LLM serving engine with paged attention.
+   WER           Word Error Rate, the share of words a speech model gets wrong.
